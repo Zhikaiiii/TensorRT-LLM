@@ -1,0 +1,6 @@
+tiktoken
+transformers_stream_generator
+datasets
+nltk
+rouge_score
+auto_gptq
