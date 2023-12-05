@@ -60,7 +60,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 dataset_cnn = load_dataset(
     "ccdv/cnn_dailymail",
-    "3.0.0"
+    "3.0.0", 
 )
 dataset = dataset_cnn["test"]
 

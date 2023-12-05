@@ -20,16 +20,16 @@ import tensorrt as trt
 import torch
 import torch.multiprocessing as mp
 import transformers
-from weight import load_from_hf_qwen
-
+from weight import load_from_hf_qwen, load_from_gptq_qwen, load_from_binary
+from smooth_quant import smooth_quant_qwen
 import tensorrt_llm
 from tensorrt_llm._utils import str_dtype_to_trt
 from tensorrt_llm.builder import Builder
 from tensorrt_llm.layers import AttentionMaskType
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
-from tensorrt_llm.models import (smooth_quantize,
-                                 weight_only_quantize)
+from tensorrt_llm.models import (weight_only_quantize,
+                                 weight_only_groupwise_quantize)
 from tensorrt_llm.network import net_guard
 from tensorrt_llm.plugin.plugin import ContextFMHAType
 from tensorrt_llm.quantization import QuantMode
@@ -37,6 +37,7 @@ from tensorrt_llm.quantization import QuantMode
 from model import QwenForCausalLM
 
 MODEL_NAME = "qwen"
+
 
 
 def get_engine_name(model, dtype, world_size, rank):
@@ -58,7 +59,10 @@ def parse_arguments():
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument('--tp_size', type=int, default=1)
     parser.add_argument('--pp_size', type=int, default=1)
-    parser.add_argument('--model_dir', type=str, default="./pyTorchModel")
+    parser.add_argument('--model_dir', type=str, default="./qwen_7b_chat")
+    parser.add_argument('--ft_model_dir', type=str, default=None)
+    parser.add_argument('--quant_ckpt_path', type=str, 
+                        default="./qwen_7b_chat_int4/gptq_model-4bit-128g.safetensors")
     parser.add_argument('--dtype',
                         type=str,
                         default='float16',
@@ -190,7 +194,7 @@ def parse_arguments():
         type=str,
         nargs='?',
         default='int8',
-        choices=['int8', 'int4'],
+        choices=['int8', 'int4', 'int4_gptq'],
         help=
         'Define the precision for the weights when using weight-only quantization.'
         'You must also use --use_weight_only for that argument to have an impact.'
@@ -275,19 +279,31 @@ def build_rank_engine(builder: Builder,
         mapping=mapping)
 
     if args.use_smooth_quant:
-        tensorrt_llm_qwen = smooth_quantize(
+        tensorrt_llm_qwen = smooth_quant_qwen(
             tensorrt_llm_qwen, args.quant_mode)
     elif args.use_weight_only:
-        tensorrt_llm_qwen = weight_only_quantize(
-            tensorrt_llm_qwen, args.quant_mode)
-    if args.model_dir is not None:
-        print('loading weights from hugging face model')
-        hf_model = transformers.AutoModelForCausalLM.from_pretrained(
-            args.model_dir, trust_remote_code=True, fp16=True).cpu()
-        load_from_hf_qwen(
-            tensorrt_llm_qwen, hf_model, mapping, dtype='float16')
-        print('load finished')
-        del hf_model
+        if args.weight_only_precision == 'int4_gptq':
+            tensorrt_llm_qwen = weight_only_groupwise_quantize(
+                tensorrt_llm_qwen, args.quant_mode, args.group_size, zero=True)
+        else:
+            tensorrt_llm_qwen = weight_only_quantize(
+                tensorrt_llm_qwen, args.quant_mode)
+
+    # Load weights from PyTorch model
+    if args.per_group:
+        load_from_gptq_qwen(tensorrt_llm_qwen, args.quant_ckpt_path, mapping)
+    else:
+        if args.ft_model_dir is not None:
+            print('loading weights for ft')
+            load_from_binary(tensorrt_llm_qwen, args.ft_model_dir, mapping)
+        else:
+            print('loading weights from hugging face model')
+            hf_model = transformers.AutoModelForCausalLM.from_pretrained(
+                args.model_dir, trust_remote_code=True, fp16=True).cpu()
+            load_from_hf_qwen(
+                tensorrt_llm_qwen, hf_model, mapping, dtype='float16')
+            print('load finished')
+            del hf_model
     # Module -> Network
     network = builder.create_network()
     network.trt_network.name = engine_name
@@ -309,12 +325,14 @@ def build_rank_engine(builder: Builder,
     # Quantization plugins.
     if args.use_smooth_quant:
         network.plugin_config.set_smooth_quant_gemm_plugin(dtype=args.dtype)
-        network.plugin_config.set_layernorm_quantization_plugin( dtype=args.dtype)
+        network.plugin_config.set_rmsnorm_quantization_plugin( dtype=args.dtype)
         network.plugin_config.set_quantize_tensor_plugin()
         network.plugin_config.set_quantize_per_token_plugin()
     elif args.use_weight_only:
-        network.plugin_config.set_weight_only_quant_matmul_plugin(
-            dtype='float16')
+        if args.per_group:
+            network.plugin_config.set_weight_only_groupwise_quant_matmul_plugin(dtype='float16')
+        else:
+            network.plugin_config.set_weight_only_quant_matmul_plugin(dtype='float16')
 
     if args.world_size > 1:
         network.plugin_config.set_nccl_plugin(args.dtype)

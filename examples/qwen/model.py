@@ -19,7 +19,7 @@ from tensorrt_llm._utils import pad_vocab_size, str_dtype_to_trt
 from tensorrt_llm.functional import gather_last_token_logits, recv, send, ACT2FN
 from tensorrt_llm.layers import (Attention, AttentionMaskType, AttentionParams,
                        ColumnLinear, RowLinear, Embedding, KeyValueCacheParams,
-                       PositionEmbeddingType, RmsNorm)
+                       PositionEmbeddingType, RmsNorm, GatedMLP)
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.module import Module, ModuleList
 from tensorrt_llm.quantization import QuantMode
@@ -225,7 +225,7 @@ class QwenDecoderLayer(Module):
             instance_id=2 * layer_id,
         )
 
-        self.mlp = QWenMLP(hidden_size=hidden_size,
+        self.mlp = GatedMLP(hidden_size=hidden_size,
                             ffn_hidden_size=self.mlp_hidden_size // 2,
                             hidden_act=hidden_act,
                             dtype=dtype,
@@ -234,6 +234,7 @@ class QwenDecoderLayer(Module):
                             tp_size=tp_size,
                             quant_mode=quant_mode,
                             instance_id=2 * layer_id + 1)
+
         self.post_layernorm = RmsNorm(normalized_shape=hidden_size,
                                       eps=rms_norm_eps,
                                       dtype=dtype)
